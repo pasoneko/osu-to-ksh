@@ -1,10 +1,12 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <sstream>
 #include <vector>
 #include <unordered_map>
 #include <cmath>
 #include <unordered_set>
+#include <algorithm>
 
 using namespace std;
 
@@ -18,10 +20,30 @@ class HitObject {
     public:
         int col; // column, 64 = 0, 192 = 1, 320 = 3, 448 = 4
         int time; // time in milliseconds
+        bool isFirstNote;
         // deal with LNs later
         HitObject(int c, int t) {
             col = c;
             time = t;
+            isFirstNote = false;
+        }
+        HitObject(int c, int t, bool f) {
+            col = c;
+            time = t;
+            isFirstNote = f;
+        }
+};
+
+class TimingPoint {
+    public:
+        int time;
+        int beatLength;
+        int meter;
+
+        TimingPoint(int t, int b, int m) {
+            time = t;
+            beatLength = b;
+            meter = m;
         }
 };
 
@@ -30,20 +52,28 @@ class Measure {
         vector<HitObject> notes;
 };
 
+// Unused
+class UnsupportedKeymode : public exception {
+    public:
+        char* what() {
+            return "Keymode not currently supported qwq";
+        }
+};
+
 double calculateBPM(double tp) {
-    // tp is the value next to the offset in the TimingPoints section, it is the length of 1 quarternote at BPM
-    double bpm = 1.0 / tp * 1000 * 60;
-    return bpm;
+    // tp is the value next to the offset in the TimingPoints section, it is the length of 1 quarternote at X BPM
+    return 1.0 / tp * 1000 * 60;
 }
 
-vector<string> splitHitObject(string s){
+vector<string> splitAtComma(string str){
     vector<string> res;
-    int pos = 0;
-    while(pos < s.size()){
-        pos = s.find(",");
-        res.push_back(s.substr(0,pos));
-        s.erase(0,pos+1); // 1 is the length of the delimiter, ","
+    stringstream ss(str);
+    string seg;
+
+    while (getline(ss, seg, ',')) {
+        res.push_back(seg);
     }
+
     return res;
 }
 
@@ -72,9 +102,11 @@ int determineOptimalNoteLines(Measure measure) {
 }
 
 int determineNoteLine(int optimalNoteLines, HitObject hitObject) {
+    if (hitObject.isFirstNote) return 1;
     return round(optimalNoteLines * BPM * (fmod(hitObject.time - offset, measureLength)) / (240000 * timeSignature)) + 1;
 }
 
+// only works for 4K at the moment
 int determineColumn(int x) {
     // column, 64 = 0, 192 = 1, 320 = 3, 448 = 4
     switch(x) {
@@ -86,11 +118,26 @@ int determineColumn(int x) {
             return 2;
         case 448:
             return 3;
+        default:
+            cout << "This osu file is either for an unsupported keymode or has irregular x positions. The converter will attempt to auto-compensante." << endl;
+            cout << "Value: " << x << endl;
+            int arr[] = {abs(64-x), abs(192-x), abs(320-x), abs(448-x)};
+            int min = arr[0], i = 0;
+            for (size_t j = 1; j < 4; j++) {
+                if (arr[j] < min) {
+                    min = arr[j];
+                    i = j;
+                }
+            }
+            return i;
     }
-    return -1;
 }
 
 string writeNoteLine(string parsekey) {
+    if (parsekey.length() == 0) {
+        return "0000|00|--";
+    }
+
     string res = "";
     if (parsekey.find("0") != string::npos) {
         res += "1";
@@ -109,14 +156,18 @@ string writeNoteLine(string parsekey) {
 }
 
 int main() {
-    ifstream osu("hardcore.osu");
-    ofstream ksh("hardcore.ksh");
+    string title;
+    cout << "Enter file name without .osu:" << endl;
+    cin >> title;
+    ifstream osu(title + ".osu");
+    ofstream ksh(title + ".ksh");
 
     unordered_map<string, string> header;
     vector<HitObject> hitObjects;
+    vector<TimingPoint> timingPoints; // not implemented yet
 
     string s;
-    bool timingPoints = false;
+    bool timings = false;
     bool skip = false;
     bool metadata = true;
     while(getline(osu, s)) {
@@ -127,29 +178,31 @@ int main() {
             if (s.find("Artist:") != string::npos) header["artist"] = s.substr(s.find_last_of(":") + 1);
             if (s.find("Creator:") != string::npos) header["effect"] = s.substr(s.find_last_of(":") + 1);
             if (s.find("Version:") != string::npos) header["difficulty"] = s.substr(s.find_last_of(":") + 1);
-            if (timingPoints & !skip) {
-                firstTiming = s;
+            if (timings && !skip) {
+                vector<string> timing = splitAtComma(s);
+
                 skip = true; 
                 
-                int pos = firstTiming.find(",");
-                int pos1 = firstTiming.find(",", pos+1);
-                header["o"] = firstTiming.substr(0, pos);
+                header["o"] = timing[0];
                 offset = stod(header["o"]);
-                header["t"] = firstTiming.substr(pos+1, pos1-pos-1);
+                header["t"] = timing[1];
                 quarternoteLength = stod(header["t"]);
+                header["beat"] = timing[2];
             }
-            if (s.find("[TimingPoints]") != string::npos) timingPoints = true;
+            if (s.find("[TimingPoints]") != string::npos) timings = true;
 
             if (s.find("AudioFilename:") != string::npos) header["m"] = s.substr(s.find_last_of(":") + 2);
             if (s.find("PreviewTime:") != string::npos) header["po"] = s.substr(s.find_last_of(":") + 2);
 
-            if (s.find("BeatDivisor:") != string::npos) header["beat"] = s.substr(s.find_last_of(":") + 2);
-
             if (s.find("HitObjects") != string::npos) metadata = false;
+
+            if (s.find("jpg") != string::npos || s.find("png") != string::npos) {
+                vector<string> event1 = splitAtComma(s);
+                header["jacket"] = event1[2].substr(1, event1[2].find_last_of("\"")-1);
+            }
         } else {
-            // convert HitObject to noteline
             if (s.find(",") == string::npos) break;
-            vector<string> temp = splitHitObject(s);
+            vector<string> temp = splitAtComma(s);
             hitObjects.push_back(HitObject(stoi(temp[0]), stoi(temp[2])));
         }
     }
@@ -157,9 +210,9 @@ int main() {
     ksh <<  string("title=") + header["title"] + "\n" +
             "artist=" + header["artist"] + "\n" +
             "effect=" + header["effect"] + "\n" +
-            "jacket=" + "\n" +
+            "jacket=" + header["jacket"] + "\n" +
             "illustrator=" + "\n" +
-            "difficulty=" + header["difficulty"] + "\n" +
+            "difficulty=infinite" + "\n" + // header["difficulty"] grabs difficulty but USC defaults to novice, infinite = maximum
             "level=" + "1\n" +
             "t=" + to_string(calculateBPM(stod(header["t"]))) + "\n" +
             "m=" + header["m"] + "\n" +
@@ -186,11 +239,21 @@ int main() {
     
     Measure measures[totalMeasures];
 
+    // this can probably just be handled when creating notes but whatever
     for (HitObject h : hitObjects) {
-        int measureNumber = (h.time - offset) / measureLength;
+        double q1 = ((double) h.time - offset) / measureLength;
+        double q2 = round(q1);
+        int measureNumber = (int) q1;
+
+        double dq = abs(q2-q1);
+        // h.time != offset handles first note which will always fall on offset i think ?
+        if (h.time != offset && dq < 0.0005) {
+            measureNumber++;
+            h.isFirstNote = true;
+        }
+
         measures[measureNumber].notes.push_back(h);
     }
-
 
     for (Measure measure : measures) {
         if (measure.notes.size() == 0) {
@@ -206,15 +269,16 @@ int main() {
                 }
             }
             // should look something like "1,3,0,21"
-            int k = 0;
-            vector<string> linekeys = splitHitObject(parsekey);
-            // index = noteposition - 1
+            vector<string> linekeys = splitAtComma(parsekey);
             unordered_set<int> notepositions;
 
             for (size_t j = 0; j < measure.notes.size(); j++) {
                 notepositions.insert(determineNoteLine(optimalNoteLines, measure.notes[j]));
             }
 
+            
+
+            int k = 0;
             for (size_t m = 1; m <= optimalNoteLines; m++) {
                 if (notepositions.count(m) > 0) {
                     ksh << writeNoteLine(linekeys[k]) << "\n";
@@ -223,13 +287,10 @@ int main() {
                     ksh << "0000|00|--" << "\n";
                 }
             }
-            
         }
-
         ksh << "--\n";
     }
     
-
     osu.close();
     ksh.close();
 
