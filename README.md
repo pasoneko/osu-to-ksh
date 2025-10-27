@@ -4,3 +4,5 @@
  bug that ignores first note(s) of measure
  - v1.1.0 (2024-02-08) bugs fixed! supports all constant-bpm maps, LNs are converted to rice, though :p
  - Future: LN support, BPM/SV change support, keymodes other than 4K
+
+I don't have time to work on this I'm sorry :p 
